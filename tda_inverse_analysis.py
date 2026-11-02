@@ -17,6 +17,7 @@ import numpy as np
 import pandas as pd
 from scipy.spatial.distance import pdist, squareform
 import homcloud.interface as hc
+import matplotlib.pyplot as plt
 
 # ================================================================
 # 1. CONFIGURATION
@@ -158,89 +159,285 @@ def extract_cycles(point_cloud, stock_names, date):
     return cycles
 
 # ================================================================
-# 5. MAIN ROLLING-WINDOW ANALYSIS
+# 5. STOCK PARTICIPATION HEATMAP
+# ================================================================
+
+def create_participation_heatmap(participation_df, dates, stock_names):
+
+    if participation_df.empty:
+        print("No representative-cycle participation data available.")
+        return
+
+    date_index = {
+        date: i for i, date in enumerate(dates)
+    }
+
+    stock_index = {
+        stock: i for i, stock in enumerate(stock_names)
+    }
+
+    # Rows = stocks; columns = rolling-window dates
+    grid = np.zeros(
+        (len(stock_names), len(dates)),
+        dtype=np.int32
+    )
+
+    for _, row in participation_df.iterrows():
+
+        stock = row["Stock_ID"]
+        date = row["Date"]
+
+        if stock in stock_index and date in date_index:
+
+            grid[
+                stock_index[stock],
+                date_index[date]
+            ] = int(row["Cycle_Count"])
+
+    positive_values = grid[grid > 0]
+
+    if positive_values.size == 0:
+        print("No positive participation counts to plot.")
+        return
+
+    vmax = max(
+        float(np.percentile(positive_values, 98)),
+        1.0
+    )
+
+    fig, ax = plt.subplots(
+        figsize=(12, 6)
+    )
+
+    image = ax.imshow(
+        grid,
+        aspect="auto",
+        cmap="magma",
+        origin="upper",
+        vmin=0,
+        vmax=vmax,
+        interpolation="nearest"
+    )
+
+    ax.set_xlabel("Date")
+    ax.set_ylabel("Stock")
+
+    # Display a small number of stock labels.
+    tick_positions = np.linspace(
+        0,
+        len(stock_names) - 1,
+        min(5, len(stock_names)),
+        dtype=int
+    )
+
+    ax.set_yticks(tick_positions)
+    ax.set_yticklabels(
+        [stock_names[i] for i in tick_positions]
+    )
+
+    # Display approximately six date labels.
+    date_positions = np.linspace(
+        0,
+        len(dates) - 1,
+        min(6, len(dates)),
+        dtype=int
+    )
+
+    ax.set_xticks(date_positions)
+    ax.set_xticklabels(
+        [pd.Timestamp(dates[i]).strftime("%Y-%m-%d")
+         for i in date_positions],
+        rotation=30,
+        ha="right"
+    )
+
+    colorbar = fig.colorbar(image, ax=ax)
+    colorbar.set_label(
+        "Daily loop participation frequency"
+    )
+
+    fig.tight_layout()
+
+    fig.savefig(
+        OUTPUT_DIR / "stock_participation_heatmap.png",
+        dpi=300,
+        bbox_inches="tight"
+    )
+
+    plt.close(fig)
+
+    print("Saved stock_participation_heatmap.png")
+    
+# ================================================================
+# 6. MAIN ROLLING-WINDOW ANALYSIS
 # ================================================================
 
 def main():
+
     data = load_data()
 
     if len(data) < WINDOW_SIZE:
-        raise ValueError(f"At least {WINDOW_SIZE} trading days are required.")
+        raise ValueError(
+            f"At least {WINDOW_SIZE} trading days are required."
+        )
 
     all_cycles = []
-    warnings = []
+
     total_windows = len(data) - WINDOW_SIZE + 1
+
+    window_dates = []
 
     for window_number, end_index in enumerate(
         range(WINDOW_SIZE - 1, len(data)),
         start=1
     ):
-        window = data.iloc[end_index - WINDOW_SIZE + 1:end_index + 1]
+
+        window = data.iloc[
+            end_index - WINDOW_SIZE + 1:end_index + 1
+        ]
+
         date = window.index[-1].strftime("%Y-%m-%d")
 
+        window_dates.append(date)
+
         if window.isna().any().any():
-            warnings.append({"Date": date, "Reason": "Missing values in window"})
+
+            print(
+                f"Skipping window {window_number}: "
+                f"missing values ({date})"
+            )
+
             continue
 
         point_cloud, stock_names = build_point_cloud(window)
 
         if len(stock_names) < 3:
-            warnings.append({"Date": date, "Reason": "Insufficient non-zero vectors"})
+
+            print(
+                f"Skipping window {window_number}: "
+                f"insufficient non-zero vectors ({date})"
+            )
+
             continue
 
-        extracted = extract_cycles(point_cloud, stock_names, date)
+        extracted = extract_cycles(
+            point_cloud,
+            stock_names,
+            date
+        )
+
         all_cycles.extend(extracted)
 
         print(
-            f"Window {window_number}/{total_windows}: {date} | "
-            f"Extracted cycles: {len(extracted)}"
+            f"Window {window_number}/{total_windows}: "
+            f"{date} | Extracted cycles: {len(extracted)}"
         )
 
     # ============================================================
-    # 6. SAVE REPRESENTATIVE CYCLES
+    # 7. SAVE REPRESENTATIVE CYCLES
     # ============================================================
 
-    cycle_columns = ["Date", "Rank", "Birth", "Death", "Lifetime", "Point_Count", "Stock_IDs"]
-    cycle_df = pd.DataFrame(all_cycles, columns=cycle_columns)
-    cycle_df.to_csv(OUTPUT_DIR / "representative_cycles.csv", index=False)
+    cycle_columns = [
+        "Date",
+        "Rank",
+        "Birth",
+        "Death",
+        "Lifetime",
+        "Point_Count",
+        "Stock_IDs"
+    ]
+
+    cycle_df = pd.DataFrame(
+        all_cycles,
+        columns=cycle_columns
+    )
+
+    cycle_df.to_csv(
+        OUTPUT_DIR / "representative_cycles.csv",
+        index=False
+    )
 
     # ============================================================
-    # 7. STOCK PARTICIPATION FREQUENCY
+    # 8. STOCK PARTICIPATION COUNTS
     # ============================================================
 
     participation_rows = []
-    if not cycle_df.empty:
-        for date, group in cycle_df.groupby("Date"):
-            stock_counts = {}
-            for stock_string in group["Stock_IDs"]:
-                members = set(filter(None, stock_string.split(";")))
-                for stock in members:
-                    stock_counts[stock] = stock_counts.get(stock, 0) + 1
 
-            total_cycles = len(group)
-            for stock in data.columns:
-                count = stock_counts.get(stock, 0)
-                participation_rows.append({
-                    "Date": date,
-                    "Stock_ID": stock,
-                    "Cycle_Count": count,
-                    "Participation_Frequency": (count / total_cycles) if total_cycles > 0 else 0,
-                    "Total_Cycles": total_cycles
-                })
+    # Include every rolling-window date, including dates
+    # with no extracted finite H1 representative cycles.
+    for date in window_dates:
 
-    participation_df = pd.DataFrame(participation_rows)
-    participation_df.to_csv(OUTPUT_DIR / "stock_participation_frequency.csv", index=False)
+        group = cycle_df.loc[
+            cycle_df["Date"] == date
+        ]
+
+        stock_counts = {}
+
+        total_cycles = len(group)
+
+        for stock_string in group["Stock_IDs"]:
+
+            # Count each stock once per representative cycle.
+            members = set(
+                filter(None, stock_string.split(";"))
+            )
+
+            for stock in members:
+
+                stock_counts[stock] = (
+                    stock_counts.get(stock, 0) + 1
+                )
+
+        for stock in data.columns:
+
+            count = stock_counts.get(stock, 0)
+
+            participation_rows.append({
+
+                "Date": date,
+                "Stock_ID": stock,
+                "Cycle_Count": count,
+                "Total_Cycles": total_cycles
+
+            })
+
+    participation_df = pd.DataFrame(
+        participation_rows
+    )
+
+    participation_df.to_csv(
+        OUTPUT_DIR / "stock_participation_frequency.csv",
+        index=False
+    )
 
     # ============================================================
-    # 8. HIGHEST-LIFETIME CYCLE AND JACCARD DISTANCE
+    # 9. CREATE STOCK PARTICIPATION HEATMAP
+    # ============================================================
+
+    create_participation_heatmap(
+        participation_df,
+        window_dates,
+        list(data.columns)
+    )
+
+    # ============================================================
+    # 10. HIGHEST-LIFETIME CYCLE AND JACCARD DISTANCE
     # ============================================================
 
     jaccard_rows = []
+
     if not cycle_df.empty:
+
         selected = (
             cycle_df
-            .sort_values(["Date", "Lifetime"], ascending=[True, False])
-            .drop_duplicates(subset="Date", keep="first")
+            .sort_values(
+                ["Date", "Lifetime"],
+                ascending=[True, False]
+            )
+            .drop_duplicates(
+                subset="Date",
+                keep="first"
+            )
             .sort_values("Date")
         )
 
@@ -248,37 +445,62 @@ def main():
         previous_date = None
 
         for _, row in selected.iterrows():
-            current_members = set(filter(None, row["Stock_IDs"].split(";")))
+
+            current_members = set(
+                filter(None, row["Stock_IDs"].split(";"))
+            )
 
             if previous_members is None:
+
                 distance = np.nan
+
             else:
-                distance = jaccard_distance(previous_members, current_members)
+
+                distance = jaccard_distance(
+                    previous_members,
+                    current_members
+                )
 
             jaccard_rows.append({
+
                 "Previous_Date": previous_date,
                 "Date": row["Date"],
                 "Lifetime": row["Lifetime"],
                 "Stock_Count": len(current_members),
                 "Jaccard_Distance": distance,
                 "Stock_IDs": row["Stock_IDs"]
+
             })
 
             previous_members = current_members
             previous_date = row["Date"]
 
-    jaccard_df = pd.DataFrame(jaccard_rows)
-    jaccard_df.to_csv(OUTPUT_DIR / "highest_lifetime_cycle_jaccard.csv", index=False)
+    jaccard_df = pd.DataFrame(
+        jaccard_rows
+    )
+
+    jaccard_df.to_csv(
+        OUTPUT_DIR / "highest_lifetime_cycle_jaccard.csv",
+        index=False
+    )
 
     # ============================================================
-    # 9. SAVE WARNINGS
+    # 11. COMPLETION
     # ============================================================
-
-    pd.DataFrame(warnings).to_csv(OUTPUT_DIR / "inverse_analysis_warnings.csv", index=False)
 
     print("\nInverse analysis completed.")
-    print(f"Total representative cycles saved: {len(cycle_df)}")
-    print(f"Output directory: {OUTPUT_DIR.resolve()}")
+
+    print(
+        f"Total representative cycles: {len(cycle_df)}"
+    )
+
+    print(
+        f"Rolling windows processed: {total_windows}"
+    )
+
+    print(
+        f"Output directory: {OUTPUT_DIR.resolve()}"
+    )
 
 
 if __name__ == "__main__":

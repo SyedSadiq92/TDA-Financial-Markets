@@ -6,7 +6,7 @@ Input: logret.tsv (first column dates, remaining columns stock returns).
 Outputs in tda_output/:
   tda_daily_summary.csv
   tda_persistence_intervals.csv
-  arag_tda_ftrs.csv
+  tda_features.csv
   persistence_comparison.png
 
 Changes applied:
@@ -159,7 +159,7 @@ if not interval_df.empty:
     compat = interval_df.copy()
     compat["Dimension"] = compat["Dimension"].map({0: "H0", 1: "H1"})
     compat[["Date", "Dimension", "Birth", "Death", "Lifetime"]].to_csv(
-        OUT / "arag_tda_ftrs.csv", index=False, header=False
+        OUT / "tda_features.csv", index=False, header=False
     )
 
 if MAKE_FIGURE:
